@@ -1,0 +1,58 @@
+# Ghidra configuration
+
+ghidra_projects_dir: "~/ghidra-projects/binsim_analyzer"
+
+# Optimizations
+
+optimizations:
+  O0: "-Wall -g -O0"
+  O1: "-Wall -g -O1"
+  O2: "-Wall -g -O2"
+  O3: "-Wall -g -O3"
+  Os: "-Wall -g -Os"
+  O0-lto: "-Wall -g -O0 -flto"
+  O1-lto: "-Wall -g -O1 -flto"
+  O2-lto: "-Wall -g -O2 -flto"
+  O3-lto: "-Wall -g -O3 -flto"
+  Os-lto: "-Wall -g -Os -flto"
+
+# Libraries to analyze
+
+libraries:
+  - name: openssl
+    available_versions: ["3.0.0", "3.0.19", "3.5.5"]
+    archives: "libcrypto.a;libssl.a"
+    download_script: |
+      cd {download_path}
+      echo "Download not implemented."
+    build_script: |
+      cd {build_path}
+      CFLAGS="{compiler_flags}" CXXFLAGS="{compiler_flags}" {source_path}/Configure
+      make
+
+  - name: libpng
+    available_versions: ["1.6.34", "1.6.55"]
+    archives: "lib64/libpng16.a"
+    download_script: |
+      cd {download_path}
+      echo "Download not implemented."
+    build_script: |
+      cd {source_path}
+      cp scripts/makefile.std Makefile
+      cmake . -DCMAKE_INSTALL_PREFIX={build_path} -DCMAKE_C_FLAGS="{compiler_flags}"
+      make
+      make install
+
+  - name: glibc
+    available_versions: ["2.43", "2.42", "2.41"]
+    archives: "libc.a"
+    download_script: |
+      cd {download_path}
+      wget https://ftp.gnu.org/gnu/glibc/glibc-{version}.tar.xz
+      tar -xvf glibc-{version}.tar.xz
+      mv glibc-{version} {source_path}/..
+
+    build_script: |
+      cd {build_path}
+      {source_path}/configure --prefix={build_path}/usr CFLAGS="{compiler_flags}"
+      make

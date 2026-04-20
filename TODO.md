@@ -1,0 +1,4 @@
+- Various todos in analysis.py
+- Generate statistics of numbers of functions and sizes of files?
+- Features for saving space?
+- Support for different formats for function data (e.g. pseudocode instead of raw bytes)
