@@ -3,6 +3,7 @@ name = "binsim-analyzer"
 version = "0.1.0"
 description = "Automated binary similarity analysis for open-source libraries"
 readme = "README.md"
+requires-python = ">=3.14"
 dependencies = [
     "pyyaml",
     "pyelftools",
