@@ -35,7 +35,7 @@ libraries:
 
   - name: libpng
     available_versions: ["1.6.34", "1.6.58"]
-    archives: "lib64/libpng16.a"
+    archives: "lib/libpng16.a"
     download_script: |
       cd {download_path}
       wget https://github.com/pnggroup/libpng/archive/refs/tags/v{version}.tar.gz

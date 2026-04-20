@@ -30,7 +30,7 @@ def file_range(program: Program, addr_range: AddressRange) -> ByteRange | None:
 
 class ExtractTask(Task[tuple[str, Library, str]]):
 
-    task_name = 'extract_ghidra'
+    task_name = 'extract'
     needs_temp = False
     needs_ghidra = True
 

@@ -23,7 +23,7 @@ def execute_task_pool(task: type[Task[Any]], task_pool: Sequence[tuple[Task[Any]
     initializer = None
     if task.needs_ghidra:
         initializer = init_ghidra_worker
-    with mp.Pool(processes=n_procs, initializer=initializer, initargs=(None,)) as pool:
+    with mp.Pool(processes=n_procs, initializer=initializer) as pool:
         results = pool.starmap(run_task, task_pool)
     failed = [task_pool[i][0].task_id for i in range(len(results)) if results[i] == False]
     print(f"All {task.task_name} tasks complete ({n_tasks - len(failed)}/{n_tasks} succeeded).\nFailed tasks: {failed}")
