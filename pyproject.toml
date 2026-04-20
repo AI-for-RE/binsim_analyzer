@@ -10,5 +10,8 @@ dependencies = [
     "pylzma",
     "msgpack",
     "pyghidra",
-    "ghidra-stubs==12.0.4"
+    "ghidra-stubs==12.0.4",
+    "mypy",
+    "ruff",
+    "types-PyYAML"
 ]
