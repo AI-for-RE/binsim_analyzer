@@ -1,6 +1,9 @@
 import json
+import random
 from statistics import mean
 from typing import TYPE_CHECKING
+
+from filelock import FileLock
 
 from .tasks_common import Task
 from bindiff_types import VariantPair, QualifiedName, ByteRange
@@ -59,31 +62,40 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
         # function_key -> variant_id -> bytes
         extracted_bytes: dict[str, dict[str, bytes]] = {}
 
-        for variant_id, objects in work.items():
-            self.write_log(f"Opening project '{variant_id}' in {project_base_dir}...")
-            with pyghidra.open_project(project_base_dir, variant_id, create=False) as project:
-                for object_path, functions in objects.items():
-                    project_object_path = "/" + object_path
-                    try:
-                        program_ctx = pyghidra.program_context(project, project_object_path)
-                    except FileNotFoundError:
-                        self.write_log(f"WARNING: {project_object_path} not found in project {variant_id}, skipping {len(functions)} function(s).")
-                        continue
-                    with program_ctx as program:
-                        (file_bytes,) = program.getMemory().getAllFileBytes()
-                        expected_name = os.path.basename(object_path)
-                        actual_name = str(file_bytes.getFilename())
-                        if actual_name != expected_name:
-                            self.write_log(f"WARNING: file_bytes name '{actual_name}' does not match object name '{expected_name}' for {project_object_path}.")
-                        for (function_key, byte_ranges) in functions:
-                            function_bytes = bytes()
-                            for byte_range in byte_ranges:
-                                start = byte_range.begin_addr
-                                length = byte_range.size()
-                                buf = JByteArray(length)
-                                n = file_bytes.getOriginalBytes(start, buf)
-                                function_bytes += bytes(buf[:n])
-                            extracted_bytes.setdefault(function_key, {})[variant_id] = function_bytes
+        # Shuffle variants so concurrent AnalyzeTask workers are unlikely to contend on the same project.
+        work_items = list(work.items())
+        random.shuffle(work_items)
+
+        for variant_id, objects in work_items:
+            # Serialize access to each Ghidra project across workers. Ghidra's own lock raises instead of waiting,
+            # so we wrap open_project in a FileLock and block until the project is free.
+            lock_path = os.path.join(project_base_dir, f"{variant_id}.binsim.lock")
+            self.write_log(f"Acquiring lock for project '{variant_id}'...")
+            with FileLock(lock_path):
+                self.write_log(f"Opening project '{variant_id}' in {project_base_dir}...")
+                with pyghidra.open_project(project_base_dir, variant_id, create=False) as project:
+                    for object_path, functions in objects.items():
+                        project_object_path = "/" + object_path
+                        try:
+                            program_ctx = pyghidra.program_context(project, project_object_path)
+                        except FileNotFoundError:
+                            self.write_log(f"WARNING: {project_object_path} not found in project {variant_id}, skipping {len(functions)} function(s).")
+                            continue
+                        with program_ctx as program:
+                            (file_bytes,) = program.getMemory().getAllFileBytes()
+                            expected_name = os.path.basename(object_path)
+                            actual_name = str(file_bytes.getFilename())
+                            if actual_name != expected_name:
+                                self.write_log(f"WARNING: file_bytes name '{actual_name}' does not match object name '{expected_name}' for {project_object_path}.")
+                            for (function_key, byte_ranges) in functions:
+                                function_bytes = bytes()
+                                for byte_range in byte_ranges:
+                                    start = byte_range.begin_addr
+                                    length = byte_range.size()
+                                    buf = JByteArray(length)
+                                    n = file_bytes.getOriginalBytes(start, buf)
+                                    function_bytes += bytes(buf[:n])
+                                extracted_bytes.setdefault(function_key, {})[variant_id] = function_bytes
 
         self.write_log("Building function similarity matrices...")
         similarity_matrices: dict[str, list[VariantPair]] = {} # Dictionary mapping qualified function name to its similarity scores across all pairs of variants

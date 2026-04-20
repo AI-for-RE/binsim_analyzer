@@ -10,6 +10,7 @@ dependencies = [
     "pylzma",
     "msgpack",
     "pyghidra",
+    "filelock",
     "ghidra-stubs==12.0.4",
     "mypy",
     "ruff",
