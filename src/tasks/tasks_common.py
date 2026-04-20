@@ -9,8 +9,6 @@ from typing import Any, Generic, TypeVar
 
 T = TypeVar('T')
 
-PROJECT_DIR = "/home/pheebs/Year5/honours/binsim_analyzer" # Change to your own project directory
-TMP_DIR = os.path.join(PROJECT_DIR, ".tmp")
 TASK_COMPLETE_SENTINEL = ".task_complete"
 
 class Task(ABC, Generic[T]):
@@ -39,13 +37,13 @@ class Task(ABC, Generic[T]):
     def write_log(self, message: str) -> None:
         self.log_file.write(message+'\n')
  
-    def __init__(self, task_id: str, out_dir: str, logs_dir: str, overwrite: bool, delete_temp: bool):
+    def __init__(self, task_id: str, out_dir: str, logs_dir: str, temp_dir: str, overwrite: bool, delete_temp: bool):
         if not self.task_name:
             raise Exception("Task name undefined.")
         self.task_id = task_id
         self.output_dir = os.path.abspath(self.task_directory(out_dir, self.task_id))
         self.logs_dir = os.path.abspath(self.task_directory(logs_dir, ""))
-        self.temp_dir = os.path.abspath(self.task_directory(TMP_DIR, self.task_id))
+        self.temp_dir = os.path.abspath(self.task_directory(temp_dir, self.task_id))
         self.overwrite = overwrite
         self.delete_temp = delete_temp
 

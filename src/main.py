@@ -14,7 +14,7 @@ from bindiff_types import Library, ByteRange
 import tasks
 from tasks.tasks_common import *
 
-# ORDERED list of all available tasks. Tasks that were specified in the modes list and are available, will be executed here.
+# ORDERED list of all available tasks.
 AVAILABLE_TASKS: list[type[Task[Any]]] = [tasks.DownloadTask, tasks.BuildTask, tasks.ExtractTask, tasks.MapTask, tasks.AnalyzeTask]
 
 def execute_task_pool(task: type[Task[Any]], task_pool: Sequence[tuple[Task[Any], Any]], n_procs: int, process_log_dir: str | None) -> None:
@@ -39,15 +39,18 @@ def get_analysis_priority(function_map: tasks.analyze.FunctionMap, name: str) ->
 def main() -> None:
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("-m", "--modes", nargs="*", choices=[task.task_name for task in AVAILABLE_TASKS], help="Select which operations to perform.")
+    parser.add_argument("-m", "--modes", required=True, nargs="*", choices=[task.task_name for task in AVAILABLE_TASKS], help="Select which operations to perform.")
     parser.add_argument("--out_dir", type=str, default="out", help="Location for task output files.")
     parser.add_argument("--logs_dir", type=str, default="logs", help="Location for task log files.")
+    parser.add_argument("--temp_dir", type=str, default=".tmp", help="Location for task-specific temporary files.")
 
     parser.add_argument("--config", type=str, default="config.yaml", help="Configuration file to use.")
     parser.add_argument("--overwrite", action="store_true", help="Whether or not to redo previously-completed jobs within a particular operation.")
+    parser.add_argument("--no_delete_temp", action="store_true", help="Stops the program from deleting the temporary directory after finishing. Useful for debugging. However, the program will still clear any pre-existing temp directory when starting up.")
+
     parser.add_argument("--extra_flags", type=str, default="", help="Additional compiler flags to universally add on top of the existing flags.")
     parser.add_argument("--lto", action="store_true", help="Enables the optimization settings that use LTO (link-time optimization).")
-    parser.add_argument("--no_delete_temp", action="store_true", help="Stops the program from deleting the temporary directory after finishing. Useful for debugging. However, the program will still clear any pre-existing temp directory when starting up.")
+    
     parser.add_argument("--n_procs", type=int, default=1, help="Number of processes to spawn to do concurrent builds.")
     parser.add_argument("--batch_size", type=int, default=100, help="Number of functions per analysis batch.")
     parser.add_argument("--n_batches", type=int, default=25, help="Number of analysis batches.")
@@ -55,6 +58,8 @@ def main() -> None:
 
     out_dir = args.out_dir
     logs_dir = args.logs_dir
+    temp_dir = args.temp_dir
+
     overwrite = args.overwrite
     extra_flags = args.extra_flags
     lto_enabled = args.lto
@@ -69,7 +74,7 @@ def main() -> None:
         print(f"Invalid number of processes selected ({n_procs}), defaulting to 1 (no concurrency).")
         n_procs = 1
 
-    # Create fresh log path
+    # Clear log path
     if logs_dir:
         logs_dir = os.path.abspath(logs_dir)
         if os.path.exists(logs_dir):
@@ -77,12 +82,11 @@ def main() -> None:
                 print("Error: logs_dir must be a directory.")
                 exit(1)
             shutil.rmtree(logs_dir)
-        os.mkdir(logs_dir)
 
     # Create temp directory for file operations
-    if os.path.exists(TMP_DIR):
-        shutil.rmtree(TMP_DIR)
-    os.mkdir(TMP_DIR)
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir,exist_ok=True)
 
     # Load config
     print("Loading config file...")
@@ -102,7 +106,7 @@ def main() -> None:
     for library in libraries:
         for version in library.available_versions:
             versioned_library = f"{library.name}-{version}"
-            download_task_pool.append((tasks.DownloadTask(versioned_library, out_dir, logs_dir, overwrite, delete_temp), (library, version)))
+            download_task_pool.append((tasks.DownloadTask(versioned_library, out_dir, logs_dir, temp_dir, overwrite, delete_temp), (library, version)))
             for opt in optimizations_dict.items():
                 opt_name = opt[0]
                 opt_flags = opt[1]
@@ -110,9 +114,9 @@ def main() -> None:
                     task_id = f"{versioned_library}_{opt_name}"
                     cc_flags = f"{opt_flags} {extra_flags}"
                     
-                    build_task_pool.append((tasks.BuildTask(task_id, out_dir, logs_dir, overwrite, delete_temp), (library, tasks.DownloadTask.task_directory(out_dir, versioned_library), cc_flags)))
-                    extract_task_pool.append((tasks.ExtractTask(task_id, out_dir, logs_dir, overwrite, delete_temp), (ghidra_projects_dir, library, tasks.BuildTask.task_directory(out_dir, task_id))))
-        map_task_pool.append((tasks.MapTask(library.name, out_dir, logs_dir, overwrite, delete_temp), (library, tasks.ExtractTask.task_directory(out_dir, ""))))
+                    build_task_pool.append((tasks.BuildTask(task_id, out_dir, logs_dir, temp_dir, overwrite, delete_temp), (library, tasks.DownloadTask.task_directory(out_dir, versioned_library), cc_flags)))
+                    extract_task_pool.append((tasks.ExtractTask(task_id, out_dir, logs_dir, temp_dir, overwrite, delete_temp), (ghidra_projects_dir, library, tasks.BuildTask.task_directory(out_dir, task_id))))
+        map_task_pool.append((tasks.MapTask(library.name, out_dir, logs_dir, temp_dir, overwrite, delete_temp), (library, tasks.ExtractTask.task_directory(out_dir, ""))))
 
     # Download
     if tasks.DownloadTask.task_name in modes:
@@ -160,7 +164,7 @@ def main() -> None:
                     batch_index = i // batch_size
                     task_id = f"{libname}_batch_{batch_index}"
                     # Currently everything kinda breaks if overwrite argument is not True, because batch creation may not be the same every time. So we just set overwrite=True.
-                    library_analysis_pool.append((tasks.AnalyzeTask(task_id, out_dir, logs_dir, True, delete_temp), (project_base_dir, batch)))
+                    library_analysis_pool.append((tasks.AnalyzeTask(task_id, out_dir, logs_dir, temp_dir, True, delete_temp), (project_base_dir, batch)))
 
                 # Execute analyse task
                 execute_task_pool(tasks.AnalyzeTask, library_analysis_pool, n_procs, None)

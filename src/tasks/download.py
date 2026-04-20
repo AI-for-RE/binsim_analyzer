@@ -5,6 +5,7 @@ class DownloadTask(Task[tuple[Library, str]]):
 
     task_name = 'download'
     needs_temp = True
+    needs_ghidra = False
 
     def do_task(self, task_args: tuple[Library, str]) -> None:
 

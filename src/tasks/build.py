@@ -6,6 +6,7 @@ class BuildTask(Task[tuple[Library, str, str]]):
 
     task_name = 'build'
     needs_temp = True
+    needs_ghidra = False
 
     def do_task(self, task_args: tuple[Library, str, str]) -> None:
 
@@ -13,6 +14,7 @@ class BuildTask(Task[tuple[Library, str, str]]):
 
         self.write_log(f"Copying source files from {source_dir} into temp directory {self.temp_dir}...")
         shutil.copytree(source_dir, self.temp_dir, dirs_exist_ok=True)
+        self.write_log("Executing the library build script...")
 
         # Do the build
         library.build(
