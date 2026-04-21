@@ -28,25 +28,23 @@ def file_range(program: Program, addr_range: AddressRange) -> ByteRange | None:
     length = addr_range.getMaxAddress().getOffset() - addr_range.getMinAddress().getOffset() + 1
     return ByteRange(begin, begin + length)
 
-class ExtractTask(Task[tuple[str, Library, str]]):
+class ExtractTask(Task[tuple[Library, str]]):
 
     task_name = 'extract'
     needs_temp = False
     needs_ghidra = True
 
-    def do_task(self, task_args: tuple[str, Library, str]) -> None:
+    def do_task(self, task_args: tuple[Library, str]) -> None:
 
         from ghidra.framework.options import OptionType
         from ghidra.formats.gfilesystem import GFileSystem, GFile
 
-        ghidra_projects_dir, library, build_dir = task_args
-        task_project_dir = os.path.join(ghidra_projects_dir, library.name)
-        os.makedirs(task_project_dir, exist_ok=True)
+        library, build_dir = task_args
 
         archives_dict: dict[str, dict[str, list[FunctionEntry]]] = {} # Dictionary matching archives to its object files and functions
 
         # Walk through each archive file, load every binary, and save it to the project if it doesn't exist yet
-        with pyghidra.open_project(task_project_dir, self.task_id, create=True) as project:
+        with pyghidra.open_project(self.output_dir, self.task_id, create=True) as project:
             for archive_path in library.archives:
                 self.write_log(f"=== BEGIN EXTRACTION FOR {archive_path} ===")
                 archive_id = archive_path.replace("/", "_")
@@ -123,7 +121,10 @@ class ExtractTask(Task[tuple[str, Library, str]]):
         # Serialize results
         serialized_archives = {
             archive: {
-                obj: [asdict(f) for f in functions]
+                obj: {
+                    f.name: asdict(f)
+                    for f in functions
+                }
                 for obj, functions in obj_files.items()
             }
             for archive, obj_files in archives_dict.items()

@@ -8,7 +8,6 @@ dependencies = [
     "pyyaml",
     "pyelftools",
     "pylzma",
-    "msgpack",
     "pyghidra",
     "filelock",
     "ghidra-stubs==12.0.4",

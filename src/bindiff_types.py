@@ -51,13 +51,19 @@ class QualifiedName:
     object_name: str
     func_name: str
 
-    def __str__(self) -> str:
-        return f"{self.archive_name}:{self.object_name}:{self.func_name}"
-
     @staticmethod
     def from_string(s: str) -> QualifiedName:
         archive_name, object_name, func_name = s.split(':', 2)
         return QualifiedName(archive_name, object_name, func_name)
+
+    def __str__(self) -> str:
+        return f"{self.archive_name}:{self.object_name}:{self.func_name}"
+
+    def __hash__(self) -> int:
+        return hash(str(self))
+
+    def __eq__(self, other: object) -> bool:
+        return str(self) == str(other)
 
 # TODO: Create a dataclass for defining a compilation variant
 
@@ -69,21 +75,16 @@ class ByteRange:
     def size(self) -> int:
         return self.end_addr - self.begin_addr
 
-# Defines a function within the context of an object file
+# Defines a function's relevant metadata within the context of an object file
 @dataclass
 class FunctionEntry:
     name: str
+    # entry_point: Address
     byte_ranges: list[ByteRange]
 
-# Defines a function entry and the specific pathway to locate it
+# Defines a pair of functions and their similarity score
 @dataclass
-class QualifiedFunctionEntry:
-    qualified_name: QualifiedName
-    byte_ranges: list[ByteRange]
-
-# Defines a pair of function variants and their similarity score
-@dataclass
-class VariantPair:
+class SimilarityPair:
     v1: str
     v2: str
     similiarity: float

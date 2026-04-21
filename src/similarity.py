@@ -1,8 +1,15 @@
 from abc import ABC, abstractmethod
 import lzma
+from typing import Generic, TypeVar
 
-# Interface for methods of measuring similarity
-class SimilarityAnalyzer(ABC):
+from bindiff_types import SimilarityPair
+
+T = TypeVar('T')
+
+# Class defining a particular method of measuring function similarity
+class SimilarityAnalyzer(ABC, Generic[T]):
+
+    functions_list: list[T]
 
     @staticmethod
     @abstractmethod
@@ -10,21 +17,32 @@ class SimilarityAnalyzer(ABC):
         """Name for the similarity metric."""
         ...
 
-    @staticmethod
     @abstractmethod
-    def compute_similarity(func_a: bytes, func_b: bytes) -> float:
+    def compute_similarity(self, func_a: T, func_b: T) -> float:
         """ Computes similarity between 2 functions, returning a score between 0 (completely dissimilar) and 1 (identical)."""
         ...
 
+    # Compute similarities across all pairs of functions in the provided dictionary
+    def analyze_functions(self, functions: dict[str, T]) -> list[SimilarityPair]:
+        n = len(functions)
+        sorted_items = sorted(functions.items(), key=(lambda v: v[0]))
+        output_pairs = []
+        for i in range(n):
+            v1 = sorted_items[i]
+            for j in range(i, n):
+                v2 = sorted_items[j]
+                sim_score = self.compute_similarity(v1[1], v2[1])
+                output_pairs.append(SimilarityPair(v1[0], v2[0], sim_score))
+        return output_pairs
+
 # Normalized Compression Distance (internally, uses the LZMA algorithm)
-class NCDSimilarity(SimilarityAnalyzer):
+class NCDSimilarity(SimilarityAnalyzer[bytes]):
 
     @staticmethod
     def name() -> str:
         return 'ncd'
     
-    @staticmethod
-    def compute_similarity(func_a: bytes, func_b: bytes) -> float:
+    def compute_similarity(self, func_a: bytes, func_b: bytes) -> float:
 
         # TODO: Look into filters, maybe we can improve the similarity using them
 

@@ -5,7 +5,7 @@ Verification script for analyze.py's byte extraction.
 For a sample of functions, compares the bytes that analyze.py would pull out
 of the Ghidra project (via FileBytes.getOriginalBytes) against the bytes
 read directly from the original .o file inside the corresponding .a archive,
-at the byte ranges recorded in the function map.
+at the byte ranges recorded in the per-variant functions.json.
 
 Run from the project root so paths match those produced by the pipeline:
 
@@ -13,29 +13,27 @@ Run from the project root so paths match those produced by the pipeline:
 """
 
 import argparse
+import json
 import os
-import sys
+import pickle
 import subprocess
+import sys
 import tempfile
 
-import msgpack
 import yaml
 
 # Make `src/` imports resolvable the same way main.py arranges them.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 from bindiff_types import ByteRange, Library, QualifiedName  # noqa: E402
+from tasks.map import FunctionMap  # noqa: E402
 import pyghidra  # noqa: E402
 from pyghidra import HeadlessPyGhidraLauncher  # noqa: E402
 
 
-def load_function_map(map_file: str) -> dict[str, list[tuple[str, list[ByteRange]]]]:
+def load_function_map(map_file: str) -> FunctionMap:
     with open(map_file, "rb") as f:
-        raw = msgpack.unpackb(f.read(), raw=False)
-    return {
-        name: [(v[0], [ByteRange(r[0], r[1]) for r in v[1]]) for v in variants]
-        for name, variants in raw.items()
-    }
+        return pickle.load(f)
 
 
 def archive_path_for(library: Library, archive_name: str) -> str | None:
@@ -44,6 +42,27 @@ def archive_path_for(library: Library, archive_name: str) -> str | None:
         if arch.replace("/", "_") == archive_name:
             return arch
     return None
+
+
+def load_byte_ranges(functions_json_path: str, qn: QualifiedName) -> list[ByteRange] | None:
+    """Look up byte ranges for a function inside a variant's functions.json.
+    Returns None if the file is missing, in the old (list) format, or doesn't
+    contain the target function."""
+    if not os.path.exists(functions_json_path):
+        return None
+    with open(functions_json_path) as f:
+        data = json.load(f)
+    objects = data.get(qn.archive_name)
+    if not isinstance(objects, dict):
+        return None
+    funcs = objects.get(qn.object_name)
+    if not isinstance(funcs, dict):
+        # Old list-format functions.json; caller should skip this variant.
+        return None
+    entry = funcs.get(qn.func_name)
+    if entry is None:
+        return None
+    return [ByteRange(r["begin_addr"], r["end_addr"]) for r in entry["byte_ranges"]]
 
 
 def extract_object_from_archive(archive_path: str, object_name: str, dest_dir: str) -> str | None:
@@ -70,12 +89,11 @@ def read_direct_bytes(object_file: str, byte_ranges: list[ByteRange]) -> bytes:
 def read_ghidra_bytes(
     project_base_dir: str,
     variant_id: str,
-    archive_name: str,
-    object_name: str,
+    qn: QualifiedName,
     byte_ranges: list[ByteRange],
     JByteArray: object,
 ) -> bytes:
-    project_path = "/" + os.path.join(archive_name, object_name)
+    project_path = "/" + os.path.join(qn.archive_name, qn.object_name)
     with pyghidra.open_project(project_base_dir, variant_id, create=False) as project:
         with pyghidra.program_context(project, project_path) as program:
             (file_bytes,) = program.getMemory().getAllFileBytes()
@@ -89,27 +107,30 @@ def read_ghidra_bytes(
 
 
 def pick_samples(
-    function_map: dict[str, list[tuple[str, list[ByteRange]]]],
+    function_map: FunctionMap,
     library: Library,
     build_dir_root: str,
+    extractions_dir: str,
     n: int,
-) -> list[tuple[str, str, list[ByteRange], str]]:
-    """Pick `n` (function_key, variant_id, byte_ranges, archive_path) tuples whose build artifacts exist."""
-    picks = []
-    for key, variants in function_map.items():
+) -> list[tuple[QualifiedName, str, list[ByteRange], str]]:
+    """Pick `n` (qualified_name, variant_id, byte_ranges, archive_path) tuples
+    for which the archive, the Ghidra project, and a new-format functions.json entry all exist."""
+    picks: list[tuple[QualifiedName, str, list[ByteRange], str]] = []
+    for qn, entry in function_map.items():
         if len(picks) >= n:
             break
-        qn = QualifiedName.from_string(key)
         arch_rel = archive_path_for(library, qn.archive_name)
         if arch_rel is None:
             continue
-        for (variant_id, byte_ranges) in variants:
-            if not byte_ranges or byte_ranges[0].size() < 4:
-                continue
+        for variant_id in entry.variants:
             archive_path = os.path.join(build_dir_root, variant_id, arch_rel)
             if not os.path.exists(archive_path):
                 continue
-            picks.append((key, variant_id, byte_ranges, archive_path))
+            functions_json = os.path.join(extractions_dir, variant_id, "functions.json")
+            byte_ranges = load_byte_ranges(functions_json, qn)
+            if not byte_ranges or byte_ranges[0].size() < 4:
+                continue
+            picks.append((qn, variant_id, byte_ranges, archive_path))
             break
     return picks
 
@@ -133,8 +154,9 @@ def main() -> None:
         sys.exit(1)
 
     out_dir = os.path.abspath(args.out_dir)
-    map_file = os.path.join(out_dir, "map", library.name, "function_map.msgpack")
+    map_file = os.path.join(out_dir, "map", library.name, "function_map.pkl")
     build_dir_root = os.path.join(out_dir, "build")
+    extractions_dir = os.path.join(out_dir, "extract")
     project_base_dir = os.path.join(ghidra_projects_dir, library.name)
 
     if not os.path.exists(map_file):
@@ -145,9 +167,9 @@ def main() -> None:
     function_map = load_function_map(map_file)
     print(f"  {len(function_map)} functions in map.")
 
-    samples = pick_samples(function_map, library, build_dir_root, args.samples)
+    samples = pick_samples(function_map, library, build_dir_root, extractions_dir, args.samples)
     if not samples:
-        print("No samples with existing build artifacts found; cannot verify.")
+        print("No samples with matching archive + Ghidra project + new-format functions.json found.")
         sys.exit(1)
     print(f"Selected {len(samples)} samples for verification.")
 
@@ -160,10 +182,9 @@ def main() -> None:
     matches = 0
     mismatches = 0
     errors = 0
-    for (key, variant_id, byte_ranges, archive_path) in samples:
-        qn = QualifiedName.from_string(key)
+    for (qn, variant_id, byte_ranges, archive_path) in samples:
         total_len = sum(br.size() for br in byte_ranges)
-        print(f"\n[{key}] variant={variant_id}, {len(byte_ranges)} range(s), {total_len} bytes")
+        print(f"\n[{qn}] variant={variant_id}, {len(byte_ranges)} range(s), {total_len} bytes")
         print(f"  archive={archive_path}")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -175,9 +196,7 @@ def main() -> None:
             direct = read_direct_bytes(object_file, byte_ranges)
 
         try:
-            ghidra = read_ghidra_bytes(
-                project_base_dir, variant_id, qn.archive_name, qn.object_name, byte_ranges, JByteArray
-            )
+            ghidra = read_ghidra_bytes(project_base_dir, variant_id, qn, byte_ranges, JByteArray)
         except Exception as e:
             print(f"  ERROR: Ghidra read failed: {e}")
             errors += 1

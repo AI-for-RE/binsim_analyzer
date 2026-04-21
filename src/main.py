@@ -3,16 +3,16 @@ import shutil
 import os
 import argparse
 import multiprocessing as mp
-from statistics import mean
 import yaml
-import msgpack
+import pickle
 
 from typing import Any
 
-from bindiff_types import Library, ByteRange
+from bindiff_types import Library
 
 import tasks
 from tasks.tasks_common import *
+from tasks.map import FunctionMap
 
 # ORDERED list of all available tasks.
 AVAILABLE_TASKS: list[type[Task[Any]]] = [tasks.DownloadTask, tasks.BuildTask, tasks.ExtractTask, tasks.MapTask, tasks.AnalyzeTask]
@@ -28,14 +28,6 @@ def execute_task_pool(task: type[Task[Any]], task_pool: Sequence[tuple[Task[Any]
     failed = [task_pool[i][0].task_id for i in range(len(results)) if not results[i].succeeded]
     total_runtime = sum(result.runtime for result in results)
     print(f"All {task.task_name} tasks complete ({n_tasks - len(failed)}/{n_tasks} succeeded, {total_runtime:.3f}s).\nFailed tasks: {failed}")
-
-# Get the analysis priority of a function by name in a function map
-# Take into consideration its average size across binaries, and the amount of entries in the byte range list
-def get_analysis_priority(function_map: tasks.analyze.FunctionMap, name: str) -> float:
-    function_entries = function_map[name]
-    # TODO: Factor in number of entries in byte range list?
-    average_size = mean([sum([range.size() for range in v[1]]) for v in function_entries])
-    return average_size
 
 def main() -> None:
 
@@ -96,7 +88,6 @@ def main() -> None:
 
     libraries = [Library(**entry) for entry in _config["libraries"]]
     optimizations_dict: dict[str, str] = _config["optimizations"]    
-    ghidra_projects_dir = os.path.abspath(os.path.expanduser(_config["ghidra_projects_dir"]))
 
     download_task_pool = []
     build_task_pool = []
@@ -116,7 +107,7 @@ def main() -> None:
                     cc_flags = f"{opt_flags} {extra_flags}"
                     
                     build_task_pool.append((tasks.BuildTask(task_id, out_dir, logs_dir, temp_dir, overwrite, delete_temp), (library, tasks.DownloadTask.task_directory(out_dir, versioned_library), cc_flags)))
-                    extract_task_pool.append((tasks.ExtractTask(task_id, out_dir, logs_dir, temp_dir, overwrite, delete_temp), (ghidra_projects_dir, library, tasks.BuildTask.task_directory(out_dir, task_id))))
+                    extract_task_pool.append((tasks.ExtractTask(task_id, out_dir, logs_dir, temp_dir, overwrite, delete_temp), (library, tasks.BuildTask.task_directory(out_dir, task_id))))
         map_task_pool.append((tasks.MapTask(library.name, out_dir, logs_dir, temp_dir, overwrite, delete_temp), (library, tasks.ExtractTask.task_directory(out_dir, ""))))
 
     # Download
@@ -141,21 +132,17 @@ def main() -> None:
         map_dirs = os.listdir(map_base_dir)
         for library in libraries:
             libname = library.name
-            project_base_dir = os.path.join(ghidra_projects_dir, libname)
             if libname in map_dirs and TASK_COMPLETE_SENTINEL in os.listdir(os.path.join(map_base_dir, libname)):
                 print(f"Beginning analysis of library {libname}...")
-                # Load packed function map into memory
-                map_file = os.path.join(map_base_dir, libname, "function_map.msgpack")
+
+                # Load function map into memory
+                map_file = os.path.join(map_base_dir, libname, "function_map.pkl")
                 with open(map_file, 'rb') as f:
-                    raw_map = msgpack.unpackb(f.read(), raw=False)
-                function_map: tasks.analyze.FunctionMap = {
-                    name: [(v[0], [ByteRange(r[0], r[1]) for r in v[1]]) for v in variants]
-                    for name, variants in raw_map.items()
-                }
+                    function_map: FunctionMap = pickle.load(f)
 
                 # Prioritise analysis for functions which are likely to be complicated
                 function_names = sorted(list(function_map.keys()), reverse=True,
-                                        key=lambda name: get_analysis_priority(function_map, name))
+                                        key=lambda name: function_map[name].weight)
 
                 # Build analyse task pool, splitting the function map into batches
                 library_analysis_pool = []
@@ -165,7 +152,7 @@ def main() -> None:
                     batch_index = i // batch_size
                     task_id = f"{libname}_batch_{batch_index}"
                     # Currently everything kinda breaks if overwrite argument is not True, because batch creation may not be the same every time. So we just set overwrite=True.
-                    library_analysis_pool.append((tasks.AnalyzeTask(task_id, out_dir, logs_dir, temp_dir, True, delete_temp), (project_base_dir, batch)))
+                    library_analysis_pool.append((tasks.AnalyzeTask(task_id, out_dir, logs_dir, temp_dir, True, delete_temp), (tasks.ExtractTask.task_directory(out_dir, ""), batch)))
 
                 # Execute analyse task
                 execute_task_pool(tasks.AnalyzeTask, library_analysis_pool, n_procs, None)

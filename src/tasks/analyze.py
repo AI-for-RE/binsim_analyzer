@@ -5,8 +5,10 @@ from typing import TYPE_CHECKING
 
 from filelock import FileLock
 
-from .tasks_common import Task
-from bindiff_types import VariantPair, QualifiedName, ByteRange
+from tasks.map import FunctionMap
+
+from tasks.tasks_common import Task
+from bindiff_types import QualifiedName, ByteRange, SimilarityPair
 import similarity as sim
 
 import pyghidra
@@ -15,9 +17,6 @@ import os
 
 if TYPE_CHECKING:
     from ghidra.ghidra_builtins import *
-
-# Qualified function name -> list of (compilation variant, ByteRange) pairs
-FunctionMap = dict[str, list[tuple[str, list[ByteRange]]]]
 
 # Analyze a batch of functions from a library's function map.
 class AnalyzeTask(Task[tuple[str, FunctionMap]]):
@@ -28,11 +27,10 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
 
     def do_task(self, task_args: tuple[str, FunctionMap]) -> None:
 
-
         import jpype
         JByteArray = jpype.JArray(jpype.JByte)
 
-        (project_base_dir, functions_to_variants) = task_args
+        (extractions_base_dir, function_map) = task_args
 
         # TODO:
         # - Based on a choice of similarity metric, determine stability score of each function:
@@ -49,18 +47,18 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
         # - [ ] Other methods (e.g. BCSD models?)
 
         # Group the work so each Ghidra project, and each program within the project, is opened exactly once.
-        #   variant_id -> object_path -> list of (function_key, byte_ranges)
-        work: dict[str, dict[str, list[tuple[str, list[ByteRange]]]]] = {}
-        for key, variants in functions_to_variants.items():
-            qualified_function_name = QualifiedName.from_string(key)
+        #   variant_id -> object_path -> function key
+        work: dict[str, dict[str, list[QualifiedName]]] = {}
+        for qualified_function_name, entry in function_map.items():
+            variants = entry.variants
             object_path = os.path.join(qualified_function_name.archive_name, qualified_function_name.object_name)
-            for (variant_id, byte_ranges) in variants:
-                work.setdefault(variant_id, {}).setdefault(object_path, []).append((key, byte_ranges))
+            for variant_id in variants:
+                work.setdefault(variant_id, {}).setdefault(object_path, []).append(qualified_function_name)
 
         self.write_log(f"Extracting function bytes across {len(work)} variants...")
 
-        # function_key -> variant_id -> bytes
-        extracted_bytes: dict[str, dict[str, bytes]] = {}
+        # function key -> variant_id -> bytes
+        extracted_bytes: dict[QualifiedName, dict[str, bytes]] = {}
 
         # Shuffle variants so concurrent AnalyzeTask workers are unlikely to contend on the same project.
         work_items = list(work.items())
@@ -69,11 +67,18 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
         for variant_id, objects in work_items:
             # Serialize access to each Ghidra project across workers. Ghidra's own lock raises instead of waiting,
             # so we wrap open_project in a FileLock and block until the project is free.
-            lock_path = os.path.join(project_base_dir, f"{variant_id}.binsim.lock")
+            extract_dir = os.path.abspath(os.path.join(extractions_base_dir, variant_id))
+            lock_path = os.path.join(extract_dir, f"{variant_id}.binsim.lock")
             self.write_log(f"Acquiring lock for project '{variant_id}'...")
             with FileLock(lock_path):
-                self.write_log(f"Opening project '{variant_id}' in {project_base_dir}...")
-                with pyghidra.open_project(project_base_dir, variant_id, create=False) as project:
+                # Open functions JSON
+                # Note that function JSON files (like the Ghidra projects) are indexed by variant ID so the earlier lock is enough for to avoid concurrency issues
+                json_path = os.path.join(extract_dir, "functions.json")
+                self.write_log(f"Loading function metadata file {json_path}...")
+                with open(json_path) as f:
+                    extracted_functions = json.load(f)
+                self.write_log(f"Opening project '{variant_id}' in {extract_dir}...")
+                with pyghidra.open_project(extract_dir, variant_id, create=False) as project:
                     for object_path, functions in objects.items():
                         project_object_path = "/" + object_path
                         try:
@@ -87,7 +92,13 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
                             actual_name = str(file_bytes.getFilename())
                             if actual_name != expected_name:
                                 self.write_log(f"WARNING: file_bytes name '{actual_name}' does not match object name '{expected_name}' for {project_object_path}.")
-                            for (function_key, byte_ranges) in functions:
+
+                            for function_key in functions:
+                                
+                                function = extracted_functions[function_key.archive_name][function_key.object_name][function_key.func_name]
+
+                                # Load function bytes
+                                byte_ranges = [ByteRange(r['begin_addr'], r['end_addr']) for r in function['byte_ranges']]
                                 function_bytes = bytes()
                                 for byte_range in byte_ranges:
                                     start = byte_range.begin_addr
@@ -96,11 +107,14 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
                                     n = file_bytes.getOriginalBytes(start, buf)
                                     function_bytes += bytes(buf[:n])
                                 extracted_bytes.setdefault(function_key, {})[variant_id] = function_bytes
+                                
+                                # TODO: Get the function signatures for the BSim analyzer
+
 
         self.write_log("Building function similarity matrices...")
-        similarity_matrices: dict[str, list[VariantPair]] = {} # Dictionary mapping qualified function name to its similarity scores across all pairs of variants
+        similarity_matrices: dict[QualifiedName, list[SimilarityPair]] = {} # Dictionary mapping qualified function name to its similarity scores across all pairs of variants
         results: list[dict[str, object]] = []
-        for key in functions_to_variants:
+        for key in function_map:
 
             self.write_log(f"Getting similarity for {key}...")
 
@@ -110,29 +124,20 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
                 continue
 
             # Create similarity matrix across all variants
-            variant_functions_list: list[tuple[str, bytes]] = sorted(variant_to_bytes.items(), key=(lambda v: v[0]))
-            variant_pairs: list[VariantPair] = []
-            n = len(variant_functions_list)
-            # TODO: Once we have multiple ways of scoring similarity, abstract this into a function interface or something, iterate over all ways of producing a similarity matrix
-            for i in range(n):
-                v1 = variant_functions_list[i]
-                for j in range(i, n):
-                    v2 = variant_functions_list[j]
-                    sim_score = sim.NCDSimilarity.compute_similarity(v1[1], v2[1])
-                    variant_pairs.append(VariantPair(v1[0], v2[0], sim_score))
-
+            similarity_analyzer = sim.NCDSimilarity()
+            variant_pairs = similarity_analyzer.analyze_functions(variant_to_bytes)
             similarity_matrices[key] = variant_pairs
 
         self.write_log("STABILITY SCORES:")
         for key in similarity_matrices:
             mean_similarity = float(mean([v.similiarity for v in similarity_matrices[key]]))
             results.append({
-                'name': key,
+                'name': str(key),
                 'stab_scores:': [
                     mean_similarity # TODO: Support multiple similarity scores
                 ]
             })
-            self.write_log(f"\t- {key} ({len(functions_to_variants[key])} variants): {mean_similarity}")
+            self.write_log(f"\t- {key} ({len(function_map[key].variants)} variants): {mean_similarity}")
 
         # Serialize output
         out_file = os.path.join(self.output_dir, "analysis.json")
