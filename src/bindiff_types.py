@@ -79,7 +79,7 @@ class ByteRange:
 @dataclass
 class FunctionEntry:
     name: str
-    # entry_point: Address
+    entry_point: int # byte offset in the default address space
     byte_ranges: list[ByteRange]
 
 # Defines a pair of functions and their similarity score

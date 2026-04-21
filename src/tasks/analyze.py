@@ -109,6 +109,8 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
                                 extracted_bytes.setdefault(function_key, {})[variant_id] = function_bytes
                                 
                                 # TODO: Get the function signatures for the BSim analyzer
+                                entry_point = function['entry_point']
+                                addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(entry_point)
 
 
         self.write_log("Building function similarity matrices...")

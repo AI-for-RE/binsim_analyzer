@@ -59,7 +59,7 @@ class MapTask(Task[tuple[Library, str]]):
                         name = function['name']
                         qualified_name = QualifiedName(archive_name, object_name, name)
                         # Note this is a function entry but is "named" by the compilation variant rather than the actual function name
-                        variant_entry = FunctionEntry(extract_dirname, [ByteRange(r['begin_addr'], r['end_addr']) for r in function['byte_ranges']])
+                        variant_entry = FunctionEntry(extract_dirname, function['entry_point'], [ByteRange(r['begin_addr'], r['end_addr']) for r in function['byte_ranges']])
 
                         if qualified_name in functions_to_entries:
                             functions_to_entries[qualified_name].append(variant_entry)

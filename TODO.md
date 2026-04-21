@@ -1,13 +1,10 @@
 - BSim integration
-    - Update the extract task:
-        - Update FunctionEntry (and therefore extracted function output in functions.json) to store function entry point (Ghidra Address object)
-    - We may need to enable all default analysis options (in extract.py) so that Ghidra signature generation is normal
-        - Compare functions.json in current analysis vs default Ghidra analysis, to see if there are any differences (we probably dont want differences)
     - New bsim task which either creates+stores the BSim function signatures directly, or creates a BSim database?
     - Write the BSim SimilarityAnalyzer
         - Initialization step will load and cache the signature vectors for all function variants in-memory before entering the double loop
     - Write the BSim SimilarityAnalyzer's actual similarity metric
 
+- Figure out why some functions are being split up an oddly high number of times with the full default Ghidra analysis 
 - Various todos in analysis.py
 - Generate statistics of numbers of functions and sizes of files?
 - Features for saving space?

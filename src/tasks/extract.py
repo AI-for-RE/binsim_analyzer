@@ -8,6 +8,7 @@ import re
 import json
 from typing import TYPE_CHECKING, cast
 
+import jpype
 import pyghidra
 
 if TYPE_CHECKING:
@@ -38,6 +39,7 @@ class ExtractTask(Task[tuple[Library, str]]):
 
         from ghidra.framework.options import OptionType
         from ghidra.formats.gfilesystem import GFileSystem, GFile
+        from ghidra.program.model.address import Address
 
         library, build_dir = task_args
 
@@ -73,19 +75,52 @@ class ExtractTask(Task[tuple[Library, str]]):
 
                 self.write_log("Extracting functions from object files in archive...")
                 options_to_set = ["DWARF", "Disassemble Entry Points"]
+                options_to_disable = [] # Potentially disable Decompiler Parameter ID
+
+                # Necessary to get around weird timing error, potentially caused by WSL2 timing synchronisation glitches. Might not be necessary outside of WSL
+                def _safe_analyze(program: Program) -> None:
+                    import jpype
+                    from ghidra.app.script import GhidraScriptUtil
+                    from ghidra.program.util import GhidraProgramUtilities
+                    from ghidra.app.plugin.core.analysis import AutoAnalysisManager
+
+                    monitor = pyghidra.task_monitor()
+                    with pyghidra.transaction(program, "Analyze"):
+                        GhidraScriptUtil.acquireBundleHostReference()
+                        try:
+                            mgr = AutoAnalysisManager.getAnalysisManager(program)
+                            mgr.initializeOptions()
+                            mgr.reAnalyzeAll(None)
+                            try:
+                                mgr.startAnalysis(monitor, True)
+                            except jpype.JException as e:
+                                trace = e.stacktrace()
+                                if "getTaskTimesString" in trace or "printTimedTasks" in trace:
+                                    pass
+                                else:
+                                    raise
+                            if not monitor.isCancelled():
+                                monitor.cancel()
+                            GhidraProgramUtilities.markProgramAnalyzed(program)
+                        finally:
+                            GhidraScriptUtil.releaseBundleHostReference()
+
                 def _extract_function_entries(_: DomainFile, program: Program) -> None:
                     obj_name = program.getName()
                     self.write_log(f"Analyzing program {obj_name}...")
                     analysis_props = pyghidra.analysis_properties(program)
                     with pyghidra.transaction(program):
-                        # Clear all top-level boolean analyzer options, and then only set relevant ones.
-                        for option_name in analysis_props.getLeafOptionNames():
-                            if analysis_props.getType(option_name) == OptionType.BOOLEAN_TYPE:
-                                analysis_props.setBoolean(option_name, False)
                         for option_name in options_to_set:
                             analysis_props.setBoolean(option_name, True)
+                        for option_name in options_to_disable:
+                            analysis_props.setBoolean(option_name, False)
                     # Do the analysis.
-                    analysis_log = pyghidra.analyze(program, pyghidra.task_monitor())
+                    try:
+                        # analysis_log = pyghidra.analyze(program, pyghidra.task_monitor())
+                        _safe_analyze(program)
+                    except jpype.JException as e:
+                        self.write_log(f"ERROR: Java exception in analyze for {obj_name}:\n{e.stacktrace()}")
+                        raise
                     program.save("Analyzed", pyghidra.task_monitor())
 
                     # Extract functions and add to the dictionary
@@ -104,7 +139,7 @@ class ExtractTask(Task[tuple[Library, str]]):
                             if r is not None
                         ]
                         if byte_ranges:
-                            functions.append(FunctionEntry(function.getName(), byte_ranges))
+                            functions.append(FunctionEntry(function.getName(), function.getEntryPoint().getOffset(), byte_ranges))
                         else:
                             self.write_log(f"DEBUG: Skipping function {function.getName()} (no file-backed body).")
 

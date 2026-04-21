@@ -5,6 +5,7 @@ import argparse
 import multiprocessing as mp
 import yaml
 import pickle
+import time
 
 from typing import Any
 
@@ -23,11 +24,11 @@ def execute_task_pool(task: type[Task[Any]], task_pool: Sequence[tuple[Task[Any]
     initializer = None
     if task.needs_ghidra:
         initializer = init_ghidra_worker
+    currtime = time.time()
     with mp.Pool(processes=n_procs, initializer=initializer) as pool:
         results = pool.starmap(run_task, task_pool)
     failed = [task_pool[i][0].task_id for i in range(len(results)) if not results[i].succeeded]
-    total_runtime = sum(result.runtime for result in results)
-    print(f"All {task.task_name} tasks complete ({n_tasks - len(failed)}/{n_tasks} succeeded, {total_runtime:.3f}s).\nFailed tasks: {failed}")
+    print(f"All {task.task_name} tasks complete ({n_tasks - len(failed)}/{n_tasks} succeeded, {(time.time() - currtime):.3f}s).\nFailed tasks: {failed}")
 
 def main() -> None:
 
