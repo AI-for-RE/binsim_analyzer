@@ -1,4 +1,17 @@
+- BSim integration
+    - Refactor SimilarityAnalyzer to:
+        - be a generic (to support different input types -- NCD reads bytes, BSim reads the signature vector)
+        - be an instantiable abstract class (instantiated once for each list of functions to compare) rather than an interface, with an initialization step (for setting up relevant cross-variant info)
+        - contain the pairwise analysis loop as an overridable class method (moving it here from analyze.py)
+    - We may need to enable all default analysis options (in extract.py) so that Ghidra signature generation is normal
+        - Compare functions.json in current analysis vs default Ghidra analysis, to see if there are any differences (we probably dont want differences)
+    - Update extracted function representation in extract.py and/or output in functions.json to store function entry point (Ghidra Address object)
+    - New bsim task which either creates+stores the BSim function signatures directly, or creates a BSim database?
+    - Write the BSim SimilarityAnalyzer initialization step to load and cache the signature vectors for all function variants in-memory before entering the double loop
+    - Write the BSim SimilarityAnalyzer's actual similarity metric
+
 - Various todos in analysis.py
 - Generate statistics of numbers of functions and sizes of files?
 - Features for saving space?
+    - Delete the build outputs after they've been imported into the Ghidra project?
 - Support for different formats for function data (e.g. pseudocode instead of raw bytes)

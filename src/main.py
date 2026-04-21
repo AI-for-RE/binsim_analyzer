@@ -25,8 +25,9 @@ def execute_task_pool(task: type[Task[Any]], task_pool: Sequence[tuple[Task[Any]
         initializer = init_ghidra_worker
     with mp.Pool(processes=n_procs, initializer=initializer) as pool:
         results = pool.starmap(run_task, task_pool)
-    failed = [task_pool[i][0].task_id for i in range(len(results)) if results[i] == False]
-    print(f"All {task.task_name} tasks complete ({n_tasks - len(failed)}/{n_tasks} succeeded).\nFailed tasks: {failed}")
+    failed = [task_pool[i][0].task_id for i in range(len(results)) if not results[i].succeeded]
+    total_runtime = sum(result.runtime for result in results)
+    print(f"All {task.task_name} tasks complete ({n_tasks - len(failed)}/{n_tasks} succeeded, {total_runtime:.3f}s).\nFailed tasks: {failed}")
 
 # Get the analysis priority of a function by name in a function map
 # Take into consideration its average size across binaries, and the amount of entries in the byte range list

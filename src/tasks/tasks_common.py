@@ -2,6 +2,7 @@ import shutil
 import os
 import traceback
 from abc import ABC, abstractmethod
+import time
 
 from pyghidra import HeadlessPyGhidraLauncher
 from bindiff_types import *
@@ -10,6 +11,12 @@ from typing import Any, Generic, TypeVar
 T = TypeVar('T')
 
 TASK_COMPLETE_SENTINEL = ".task_complete"
+
+# Defines the result of a completed task
+@dataclass
+class TaskResult:
+    succeeded: bool
+    runtime: float # Runtime in seconds
 
 class Task(ABC, Generic[T]):
 
@@ -66,11 +73,12 @@ def init_ghidra_worker() -> None:
 
 # Common scaffolding for running any task
 from typing import Any
-def run_task(task: Task[Any], task_args: Any) -> bool:
+def run_task(task: Task[Any], task_args: Any) -> TaskResult:
 
     pid = os.getpid()
 
     task_succeeded = True
+    task_runtime = 0.0
 
     # Skip task if it completed successfully on a previous run and overwrite is off
     sentinel_path = os.path.join(task.output_dir, TASK_COMPLETE_SENTINEL)
@@ -81,13 +89,15 @@ def run_task(task: Task[Any], task_args: Any) -> bool:
         os.makedirs(task.logs_dir, exist_ok=True)
         task.log_file = open(os.path.join(task.logs_dir, f"{task.task_id}.log"), "w", buffering=1)
 
-        try:
-            print(f"[PID {pid}] Beginning {task.task_name} task '{task.task_id}'.")
+        print(f"[PID {pid}] Beginning {task.task_name} task '{task.task_id}'.")
+        currtime = time.time()
 
+        try:
+            
             # Create temp path
             if task.needs_temp:
                 if os.path.exists(task.temp_dir):
-                    raise Exception(f"Build failed; temporary path {task.temp_dir} already exists.")
+                    raise Exception(f"Task '{task.task_id}' failed; temporary path {task.temp_dir} already exists.")
                 os.makedirs(task.temp_dir, exist_ok=False)
             
             # Create fresh output path
@@ -101,11 +111,15 @@ def run_task(task: Task[Any], task_args: Any) -> bool:
             # Mark task as complete
             open(sentinel_path, "w").close()
 
-            print(f"[PID {pid}] {task.task_name} task succeeded for '{task.task_id}'.")
+            task_runtime = time.time() - currtime
+
+            print(f"[PID {pid}] {task.task_name} task succeeded for '{task.task_id}' ({task_runtime:.3f}s).")
 
         except Exception:
             task.write_log(f"ERROR: Task failed -- {traceback.format_exc()}")
-            print(f"[PID {pid}] {task.task_name} task failed for '{task.task_id}'.")
+            task_runtime = time.time() - currtime
+
+            print(f"[PID {pid}] {task.task_name} task failed for '{task.task_id}' ({task_runtime:.3f}s).")
             task_succeeded = False
         finally:
             task.log_file.flush()
@@ -115,4 +129,4 @@ def run_task(task: Task[Any], task_args: Any) -> bool:
     else:
         print(f"[PID {pid}] {task.task_name} task for '{task.task_id}' already complete and overwrite=False, skipping.")
 
-    return task_succeeded
+    return TaskResult(task_succeeded, task_runtime)
