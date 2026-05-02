@@ -1,7 +1,7 @@
 import json
 import random
 from statistics import mean
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from filelock import FileLock
 
@@ -9,7 +9,6 @@ from tasks.map import FunctionMap
 
 from tasks.tasks_common import Task
 from bindiff_types import QualifiedName, ByteRange, SimilarityPair
-import similarity as sim
 
 import pyghidra
 
@@ -27,10 +26,26 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
 
     def do_task(self, task_args: tuple[str, FunctionMap]) -> None:
 
+        from generic.lsh.vector import WeightedLSHCosineVectorFactory, LSHVector
+        from ghidra.features.bsim.query import GenSignatures
+        from ghidra.xml import NonThreadedXmlPullParserImpl
+        from ghidra.util.task import TaskMonitor
+        from org.xml.sax.helpers import DefaultHandler
+        from java.util import ArrayList
+
+        import similarity as sim
+
         import jpype
         JByteArray = jpype.JArray(jpype.JByte)
 
         (extractions_base_dir, function_map) = task_args
+
+        # Similarity analyzers to use in analysis
+        similarity_analyzers: list[type[sim.SimilarityAnalyzer]] = [sim.NCDSimilarity, sim.BSimSimilarity]
+
+        # Input data for the similarity analyzers (function_key -> variant_id -> analyzer name -> input value)
+        analyzer_inputs: dict[QualifiedName, dict[str, dict[str, Any]]] = {}
+        for key in function_map: analyzer_inputs[key] = {}
 
         # TODO:
         # - Based on a choice of similarity metric, determine stability score of each function:
@@ -43,7 +58,7 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
         # Determine similarity scores
         # TODO: Different similarity scores:
         # - [X] Basic information-theoretic similarity (NCD with LZMA)
-        # - [ ] Ghidra BSim
+        # - [X] Ghidra BSim
         # - [ ] Other methods (e.g. BCSD models?)
 
         # Group the work so each Ghidra project, and each program within the project, is opened exactly once.
@@ -57,9 +72,6 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
 
         self.write_log(f"Extracting function bytes across {len(work)} variants...")
 
-        # function key -> variant_id -> bytes
-        extracted_bytes: dict[QualifiedName, dict[str, bytes]] = {}
-
         # Shuffle variants so concurrent AnalyzeTask workers are unlikely to contend on the same project.
         work_items = list(work.items())
         random.shuffle(work_items)
@@ -71,6 +83,7 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
             lock_path = os.path.join(extract_dir, f"{variant_id}.binsim.lock")
             self.write_log(f"Acquiring lock for project '{variant_id}'...")
             with FileLock(lock_path):
+                
                 # Open functions JSON
                 # Note that function JSON files (like the Ghidra projects) are indexed by variant ID so the earlier lock is enough for to avoid concurrency issues
                 json_path = os.path.join(extract_dir, "functions.json")
@@ -93,9 +106,18 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
                             if actual_name != expected_name:
                                 self.write_log(f"WARNING: file_bytes name '{actual_name}' does not match object name '{expected_name}' for {project_object_path}.")
 
+                            self.write_log("Caching function bytes...")
+                            entry_addrs = []
                             for function_key in functions:
+
+                                analyzer_inputs[function_key].setdefault(variant_id, {})
                                 
                                 function = extracted_functions[function_key.archive_name][function_key.object_name][function_key.func_name]
+
+                                # Extract entry point info for later BSim step
+                                entry_point = function['entry_point']
+                                addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(entry_point)
+                                entry_addrs.append(addr)
 
                                 # Load function bytes
                                 byte_ranges = [ByteRange(r['begin_addr'], r['end_addr']) for r in function['byte_ranges']]
@@ -106,11 +128,36 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
                                     buf = JByteArray(length)
                                     n = file_bytes.getOriginalBytes(start, buf)
                                     function_bytes += bytes(buf[:n])
-                                extracted_bytes.setdefault(function_key, {})[variant_id] = function_bytes
-                                
-                                # TODO: Get the function signatures for the BSim analyzer
-                                entry_point = function['entry_point']
-                                addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(entry_point)
+                                analyzer_inputs[function_key][variant_id]['ncd'] = function_bytes
+                            
+                            # Get the function signatures for the BSim analyzer
+                            # TODO: Potentially do this in a separate bsim step if this bottlenecks the analysis time. Would allow for better use of parallelism
+                            self.write_log("Caching function BSim signatures...")
+                            ghidra_functions = [program.getFunctionManager().getFunctionAt(addr) for addr in entry_addrs]
+                           
+                            # Prepare for BSim signature generation
+                            factory = WeightedLSHCosineVectorFactory()
+                            weights_file = GenSignatures.getWeightsFile(program.getLanguageID(), program.getLanguageID())
+                            with open(weights_file.getAbsolutePath()) as f:
+                                parser = NonThreadedXmlPullParserImpl(f.read(), "weights", DefaultHandler(), False)
+                                factory.readWeights(parser)
+                            gensig = GenSignatures(False)
+                            gensig.setVectorFactory(factory)
+                            gensig.openProgram(program, None, None, None, None, None)
+
+                            # Generate and cache signatures
+                            gensig.scanFunctions(ArrayList(ghidra_functions).iterator(), len(ghidra_functions), TaskMonitor.DUMMY) # TODO: Use a proper task monitor?
+                            mgr = gensig.getDescriptionManager() # pull the LSHVector for each scanned function via FunctionDescription → SignatureRecord → getLSHVector()
+                            for exe_record in mgr.executableRecordSet:
+                                for function_key in functions:
+                                    function_desc = mgr.findFunctionByName(function_key.func_name, exe_record)
+                                    # https://ghidra.re/ghidra_docs/api/ghidra/features/bsim/query/description/SignatureRecord.html
+                                    signature = function_desc.getSignatureRecord()
+                                    # TODO: If we wanted to save to a file, this is where we would call saveXml().
+                                    vector = signature.getLSHVector()
+                                    analyzer_inputs[function_key][variant_id]['bsim'] = vector
+
+                            self.write_log("Cached all BSim signatures.")
 
 
         self.write_log("Building function similarity matrices...")
@@ -118,28 +165,46 @@ class AnalyzeTask(Task[tuple[str, FunctionMap]]):
         results: list[dict[str, object]] = []
         for key in function_map:
 
-            self.write_log(f"Getting similarity for {key}...")
-
-            variant_to_bytes = extracted_bytes.get(key, {})
-            if not variant_to_bytes:
-                self.write_log(f"WARNING: No byte data extracted for {key}, skipping similarity.")
-                continue
+            variant_inputs = sorted(analyzer_inputs[key].items(), key=(lambda v: v[0]))
+            n = len(variant_inputs)
+            # if len(variant_inputs) == 0:
+            #     self.write_log(f"WARNING: No data extracted for {key}, skipping similarity.")
+            #     continue
 
             # Create similarity matrix across all variants
-            similarity_analyzer = sim.NCDSimilarity()
-            variant_pairs = similarity_analyzer.analyze_functions(variant_to_bytes)
-            similarity_matrices[key] = variant_pairs
+            similarity_matrices[key] = []
+            for i in range(n):
+                v1_name, v1_data = variant_inputs[i]
+                for j in range(i, n):
+                    v2_name, v2_data = variant_inputs[j]
+                    sim_dict = {}
+                    for analyzer_class in similarity_analyzers:
+                        analyzer_name = analyzer_class.name()
+                        if analyzer_name in v1_data and analyzer_name in v2_data:
+                            sim_score = analyzer_class.compute_similarity(v1_data[analyzer_name], v2_data[analyzer_name])
+                            sim_dict[analyzer_name] = sim_score
+                        else:
+                            if analyzer_name not in v1_data:
+                                self.write_log(f"WARNING: Data for analyzer '{analyzer_name}' not found in function variant {key}:{v1_name}")
+                            if analyzer_name not in v2_data:
+                                self.write_log(f"WARNING: Data for analyzer '{analyzer_name}' not found in function variant {key}:{v2_name}")
+                    similarity_matrices[key].append(SimilarityPair(v1_name, v2_name, sim_dict))
 
         self.write_log("STABILITY SCORES:")
         for key in similarity_matrices:
-            mean_similarity = float(mean([v.similiarity for v in similarity_matrices[key]]))
+            stability_scores = [
+                (analyzer_class.name(), float(mean([
+                    sim_pair.sim_dict[analyzer_class.name()]
+                    for sim_pair in similarity_matrices[key]
+                    if analyzer_class.name() in sim_pair.sim_dict
+                ])))
+                for analyzer_class in similarity_analyzers
+            ]
             results.append({
                 'name': str(key),
-                'stab_scores:': [
-                    mean_similarity # TODO: Support multiple similarity scores
-                ]
+                'stab_scores:': stability_scores
             })
-            self.write_log(f"\t- {key} ({len(function_map[key].variants)} variants): {mean_similarity}")
+            self.write_log(f"\t- {key} ({len(function_map[key].variants)} variants): {stability_scores}")
 
         # Serialize output
         out_file = os.path.join(self.output_dir, "analysis.json")

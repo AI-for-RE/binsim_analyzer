@@ -37,9 +37,7 @@ class ExtractTask(Task[tuple[Library, str]]):
 
     def do_task(self, task_args: tuple[Library, str]) -> None:
 
-        from ghidra.framework.options import OptionType
         from ghidra.formats.gfilesystem import GFileSystem, GFile
-        from ghidra.program.model.address import Address
 
         library, build_dir = task_args
 
@@ -74,8 +72,8 @@ class ExtractTask(Task[tuple[Library, str]]):
                 # - Disassemble Entry Points: Disassembles functions from Ghidra function entry points (which were created by the DWARF analyzer)
 
                 self.write_log("Extracting functions from object files in archive...")
-                options_to_set = ["DWARF", "Disassemble Entry Points"]
-                options_to_disable = [] # Potentially disable Decompiler Parameter ID
+                options_to_set = ["DWARF", "Disassemble Entry Points"] # Enable Decompiler Parameter ID? This would be very time-consuming though
+                options_to_disable = []
 
                 # Necessary to get around weird timing error, potentially caused by WSL2 timing synchronisation glitches. Might not be necessary outside of WSL
                 def _safe_analyze(program: Program) -> None:

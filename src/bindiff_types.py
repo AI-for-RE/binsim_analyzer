@@ -82,9 +82,9 @@ class FunctionEntry:
     entry_point: int # byte offset in the default address space
     byte_ranges: list[ByteRange]
 
-# Defines a pair of functions and their similarity score
+# Defines a pair of functions and their similarity scores (across many possible similarity metrics)
 @dataclass
 class SimilarityPair:
     v1: str
     v2: str
-    similiarity: float
+    sim_dict: dict[str, float]
